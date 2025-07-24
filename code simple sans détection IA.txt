@@ -1,0 +1,123 @@
+#!/bin/bash
+
+#====================================
+# Pare-feu adaptable à la collecte de trafic normal et anormal pour IA
+# Auteur : Leamsi
+#====================================
+
+echo "Initialisation du pare-feu..."
+
+# 1. Vider les tables existantes
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t mangle -F
+
+# 2. Politique par défaut (mode sécurisé)
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# 3. Maintenir les connexions établies
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 4. Loopback (permettre le trafic local)
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# 5. ICMP (Ping) + LOG pour IA
+iptables -A INPUT -p icmp -m limit --limit 5/min -j LOG --log-prefix "PING-OK: "
+iptables -A INPUT -p icmp -j ACCEPT
+iptables -A OUTPUT -p icmp -j ACCEPT
+
+# 6. SSH sur port 2222 + LOG
+iptables -A INPUT -p tcp --dport 2222 -m limit --limit 5/min -j LOG --log-prefix "SSH-OK: "
+iptables -A INPUT -p tcp --dport 2222 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 2222 -j ACCEPT
+
+# 7. DNS (UDP/TCP) + LOG
+iptables -A OUTPUT -p udp --dport 53 -m limit --limit 5/min -j LOG --log-prefix "DNS-OUT: "
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A INPUT  -p udp --dport 53 -j ACCEPT
+
+iptables -A OUTPUT -p tcp --dport 53 -m limit --limit 5/min -j LOG --log-prefix "DNS-TCP-OUT: "
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+iptables -A INPUT  -p tcp --dport 53 -j ACCEPT
+
+# 8. NTP (synchronisation heure)
+iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
+
+# 9. HTTP/HTTPS + LOG
+iptables -A OUTPUT -p tcp --dport 80 -m limit --limit 5/min -j LOG --log-prefix "HTTP-OUT: "
+iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
+
+iptables -A OUTPUT -p tcp --dport 443 -m limit --limit 5/min -j LOG --log-prefix "HTTPS-OUT: "
+iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+
+iptables -A INPUT -p tcp --dport 80 -m limit --limit 5/min -j LOG --log-prefix "HTTP-IN: "
+iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+
+iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
+
+# 10. FTP + LOG
+modprobe ip_conntrack_ftp
+
+iptables -A INPUT -p tcp --dport 20:21 -m limit --limit 5/min -j LOG --log-prefix "FTP-IN: "
+iptables -A INPUT -p tcp --dport 20:21 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 20:21 -j ACCEPT
+
+# 11. MAIL (SMTP, POP3, IMAP) + LOG
+for port in 25 110 143 995; do
+    iptables -A INPUT -p tcp --dport $port -m limit --limit 5/min -j LOG --log-prefix "MAIL-IN: "
+    iptables -A INPUT -p tcp --dport $port -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport $port -j ACCEPT
+done
+
+# 12. Monit (port 1337) + LOG
+iptables -A INPUT -p tcp --dport 1337 -m limit --limit 5/min -j LOG --log-prefix "MONIT-IN: "
+iptables -A INPUT -p tcp --dport 1337 -j ACCEPT
+
+# 13. iSCSI (port 3260, si besoin)
+iptables -A OUTPUT -p tcp --dport 3260 -m state --state NEW,ESTABLISHED -j ACCEPT
+
+# 14. Détection d'anomalies (Scan, brute-force, invalid packets)
+
+# SYN flood / port scan
+iptables -N SCAN
+iptables -A SCAN -j LOG --log-prefix "SCAN-BLOCKED: "
+iptables -A SCAN -j DROP
+
+iptables -A INPUT -p tcp --tcp-flags ALL SYN -m limit --limit 50/s --limit-burst 100 -j ACCEPT
+iptables -A INPUT -p tcp --tcp-flags ALL SYN -j SCAN
+
+# SSH Brute-force protection
+iptables -A INPUT -p tcp --dport 2222 -m recent --set --name SSH
+iptables -A INPUT -p tcp --dport 2222 -m recent --update --seconds 60 --hitcount 5 --name SSH -j LOG --log-prefix "SSH-BRUTEFORCE: "
+iptables -A INPUT -p tcp --dport 2222 -m recent --update --seconds 60 --hitcount 5 --name SSH -j DROP
+
+# Paquets invalides
+iptables -A INPUT -m state --state INVALID -j LOG --log-prefix "INVALID-PKT: "
+iptables -A INPUT -m state --state INVALID -j DROP
+
+# Limitation connexions simultanées (DoS)
+iptables -A INPUT -p tcp --syn -m connlimit --connlimit-above 10 -j LOG --log-prefix "CONN-LIMIT: "
+iptables -A INPUT -p tcp --syn -m connlimit --connlimit-above 10 -j DROP
+
+# 15. Persistance des règles
+if ! command -v netfilter-persistent &> /dev/null
+then
+    echo "Installation de iptables-persistent..."
+    apt install -y iptables-persistent
+fi
+
+netfilter-persistent save
+
+# 16. Mise en place de la collecte centralisée des logs via rsyslog
+echo "Activation de la collecte centralisée des logs..."
+# Assurez-vous que rsyslog est configuré pour envoyer les logs à un serveur central
+echo "local0.*   /var/log/firewall.log" >> /etc/rsyslog.conf
+systemctl restart rsyslog
+
+echo "Pare-feu configuré avec succès pour la collecte de logs normal/anormal."
