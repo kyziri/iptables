@@ -115,9 +115,6 @@ fi
 netfilter-persistent save
 
 # 16. Mise en place de la collecte centralisée des logs via rsyslog
-echo "Activation de la collecte centralisée des logs..."
-# Assurez-vous que rsyslog est configuré pour envoyer les logs à un serveur central
-echo "local0.*   /var/log/firewall.log" >> /etc/rsyslog.conf
 systemctl restart rsyslog
 
 echo "Pare-feu configuré avec succès pour la collecte de logs normal/anormal."
